@@ -5,7 +5,7 @@ baseurl: "/EnStore"
 
 # 作者信息
 author:
-  name: "EnStory"
+  name: "张逸安"
 
 # 构建设置
 markdown: kramdown
