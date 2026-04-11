@@ -1,33 +1,13 @@
 /**
  * EnStory — lookup.js
- * 实时词源查询：通过 CORS 代理抓取词源谷 /word/{word} 页面，解析后渲染
- * 
- * 代理配置说明：
- *   1. 部署 cors-proxy-worker.js 到 Cloudflare Workers，将 URL 填入 CF_WORKER_URL
- *   2. 也可直接使用免费代理（自动降级），但可能不稳定
+ * 实时词源查询：直接抓取词源谷 /word/{word} 页面并解析渲染
+ *
+ * 前置要求：安装 Allow CORS 扩展（Chrome Web Store）
+ * 安装后启用扩展，浏览器即可正常跨域访问词源谷
  */
 
 (function () {
   'use strict';
-
-  // ══════════════════════════════════════════════════════════════
-  // 👉 在这里填入你的 Cloudflare Worker URL（部署后复制过来）
-  //    留空则自动降级到免费代理（可能较慢）
-  // TODO: 部署 Vercel Edge Function 后填入 API 地址
-  const CF_WORKER_URL = '';
-  // ══════════════════════════════════════════════════════════════
-
-  // ── CORS 代理列表（自动切换） ──────────────────────────────────────
-  const PROXY_LIST = (() => {
-    const list = [];
-    if (CF_WORKER_URL) {
-      list.push(url => `${CF_WORKER_URL}/?url=${encodeURIComponent(url)}`);
-    }
-    // 免费代理（不稳定，仅作降级）
-    list.push(url => `https://corsproxy.io/?${encodeURIComponent(url)}`);
-    list.push(url => `https://api.allorigins.win/get?url=${encodeURIComponent(url)}`);
-    return list;
-  })();
 
   const BASE = 'https://www.ciyuangu.com';
 
@@ -40,26 +20,14 @@
       .replace(/"/g, '&quot;');
   }
 
-  // 通过代理拉取 HTML
-  async function fetchHtml(targetUrl) {
-    let lastErr;
-    for (const proxyFn of PROXY_LIST) {
-      try {
-        const proxyUrl = proxyFn(targetUrl);
-        const res = await fetch(proxyUrl, { signal: AbortSignal.timeout(8000) });
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const json = await res.json().catch(() => null);
-        if (json && json.contents) return json.contents;
-        return await res.text();
-      } catch (e) {
-        lastErr = e;
-      }
-    }
-    throw lastErr || new Error('所有代理均请求失败');
+  // 直接抓取 HTML（Allow CORS 扩展绕过跨域限制）
+  async function fetchHtml(url) {
+    const res = await fetch(url, { signal: AbortSignal.timeout(10000) });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    return await res.text();
   }
 
   // ── 判断词条是否存在 ───────────────────────────────────────────────
-  // 词源谷的"词不存在"页面通常包含这些文本
   const NOT_FOUND_KEYWORDS = [
     '未找到', '找不到', '词条不存在', '没有找到', '404', 'not found',
     '页面不存在', '这个词还没有', '暂无收录'
@@ -77,7 +45,6 @@
     const bodyText = doc.body ? (doc.body.innerText || doc.body.textContent || '') : '';
     const bodyHtml = doc.body ? doc.body.innerHTML || '' : '';
 
-    // 检测是否为"词不存在"页面
     if (isNotFoundPage(bodyText) || isNotFoundPage(bodyHtml)) {
       return { word, notFound: true };
     }
@@ -95,13 +62,11 @@
     };
 
     // ── 音标 ─────────────────────────────────────────────────────
-    // 典型格式: 英 [ˈkəˈmeməreit]  美 [kəˈmeməret]
     const phoneticMatch = bodyText.match(/英\s*[\[【]([^\]】]+)[\]】].*?美\s*[\[【]([^\]】]+)[\]】]/s);
     if (phoneticMatch) {
       result.phonetic_en = phoneticMatch[1].trim();
       result.phonetic_us = phoneticMatch[2].trim();
     } else {
-      // 宽松匹配
       const pm = bodyText.match(/\[([^\]]{5,50})\]/);
       if (pm) result.phonetic_en = pm[1].trim();
     }
@@ -113,7 +78,6 @@
     if (posMatch) result.pos = posMatch[0];
 
     // ── 词源正文 ───────────────────────────────────────────────────
-    // 找含词源关键词的段落
     const allEls = Array.from(doc.querySelectorAll('p, div.content, .word-content, .entry-content, article > div'));
     const etyCandidates = allEls
       .map(el => el.textContent.trim())
@@ -127,7 +91,6 @@
     if (etyCandidates.length > 0) {
       result.etymology = etyCandidates.slice(0, 4).join('\n\n');
     } else {
-      // 降级：找最长的正文段落
       const bodyParas = Array.from(doc.querySelectorAll('p'))
         .map(el => el.textContent.trim())
         .filter(t => t.length > 50)
@@ -135,7 +98,6 @@
       result.etymology = bodyParas.slice(0, 3).join('\n\n');
     }
 
-    // 如果正文太短或为空，视为无效页面
     if (!result.etymology || result.etymology.length < 20) {
       return { word, notFound: true };
     }
@@ -144,8 +106,7 @@
     const yearMatch = result.etymology.match(/(\d{4})\s*年/);
     if (yearMatch) result.first_year = yearMatch[1];
 
-    // ── 相关词 ─────────────────────────────────────────────────────
-    // 只从 <div class="related"> 区块提取，排除随机词区域 <aside class="hot">
+    // ── 相关词（仅从 div.related 提取，排除随机词） ────────────────
     const relatedDiv = doc.querySelector('.related');
     const links = relatedDiv
       ? Array.from(relatedDiv.querySelectorAll('a[href*="/word/"]'))
@@ -294,7 +255,6 @@
       });
     }
 
-    // 相关词点击
     document.querySelectorAll('.lookup-related-link').forEach(a => {
       a.addEventListener('click', function (e) {
         e.preventDefault();
@@ -320,7 +280,7 @@
     }, 2200);
   }
 
-  // ── 核心查询：只用 /word/ ──────────────────────────────────────────
+  // ── 核心查询 ──────────────────────────────────────────────────────
   async function lookupWord(rawWord) {
     const word = rawWord.trim().toLowerCase().replace(/\s+/g, '-');
     if (!word) return;
@@ -347,7 +307,7 @@
     }
   }
 
-  // ── 初始化 ────────────────────────────────────────────────────────
+  // ── 初始化 ───────────────────────────────────────────────────────
   document.addEventListener('DOMContentLoaded', function () {
     const input = document.getElementById('lookupInput');
     const btn = document.getElementById('lookupBtn');
@@ -364,7 +324,6 @@
       }
     });
 
-    // 快捷词按钮
     document.querySelectorAll('.tip-word').forEach(b => {
       b.addEventListener('click', function () {
         input.value = this.dataset.word;
@@ -372,7 +331,6 @@
       });
     });
 
-    // URL query string 自动查词
     const params = new URLSearchParams(location.search);
     const q = params.get('q');
     if (q) {
