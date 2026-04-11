@@ -8,7 +8,7 @@ title: "探索英语单词的故事"
   <div class="container">
     <div class="hero-text">
       <h1 class="hero-title">每个单词<br>都有一个故事</h1>
-      <p class="hero-subtitle">探索英语词汇的起源、历史沿革与文化背景，<br>让语言学习变成一场时间旅行。</p>
+      <p class="hero-subtitle">输入任意英文单词，<br>实时探索词源、演变与文化背景。</p>
     </div>
 
     <!-- 搜索框 -->
@@ -25,30 +25,42 @@ title: "探索英语单词的故事"
   </div>
 </section>
 
-<!-- 精选单词 -->
+<!-- 快捷入口 -->
 <section class="featured-section">
   <div class="container">
-    <h2 class="section-heading">精选词条</h2>
+    <h2 class="section-heading">开始探索</h2>
     <div class="words-grid">
-      {% assign featured_words = site.words | sample: 6 %}
-      {% for word in featured_words %}
-      <a href="{{ word.url | relative_url }}" class="word-card">
+      <a href="{{ '/lookup/' | relative_url }}?q=serendipity" class="word-card">
         <div class="word-card-inner">
-          <span class="word-card-title">{{ word.title }}</span>
-          {% if word.phonetic %}
-          <span class="word-card-phonetic">{{ word.phonetic }}</span>
-          {% endif %}
-          {% if word.part_of_speech %}
-          <span class="word-card-pos">{{ word.part_of_speech }}</span>
-          {% endif %}
-          <p class="word-card-def">{{ word.definition }}</p>
+          <span class="word-card-title">serendipity</span>
+          <p class="word-card-def">意外发现美好事物的运气</p>
           <div class="word-card-hint">点击探索词源 →</div>
         </div>
       </a>
-      {% endfor %}
+      <a href="{{ '/lookup/' | relative_url }}?q=nostalgia" class="word-card">
+        <div class="word-card-inner">
+          <span class="word-card-title">nostalgia</span>
+          <p class="word-card-def">对往事的怀念与惆怅</p>
+          <div class="word-card-hint">点击探索词源 →</div>
+        </div>
+      </a>
+      <a href="{{ '/lookup/' | relative_url }}?q=philosophy" class="word-card">
+        <div class="word-card-inner">
+          <span class="word-card-title">philosophy</span>
+          <p class="word-card-def">热爱智慧，追问人生根本</p>
+          <div class="word-card-hint">点击探索词源 →</div>
+        </div>
+      </a>
+      <a href="{{ '/lookup/' | relative_url }}?q=catastrophe" class="word-card">
+        <div class="word-card-inner">
+          <span class="word-card-title">catastrophe</span>
+          <p class="word-card-def">戏剧的结局，灾难的降临</p>
+          <div class="word-card-hint">点击探索词源 →</div>
+        </div>
+      </a>
     </div>
     <div class="section-cta">
-      <a href="{{ '/words/' | relative_url }}" class="btn btn-primary">浏览全部词条</a>
+      <a href="{{ '/lookup/' | relative_url }}" class="btn btn-primary">打开探词工具 →</a>
     </div>
   </div>
 </section>
@@ -63,31 +75,27 @@ title: "探索英语单词的故事"
         <p>每个单词都有其出生证明——拉丁语、希腊语、古英语……追溯词语的源头，理解其本质含义。</p>
       </div>
       <div class="feature-card">
-        <div class="feature-icon">📜</div>
-        <h3>历史沿革</h3>
-        <p>词义随时代演变。了解单词如何在数百年间改变含义，见证语言与文明的共同演化。</p>
+        <div class="feature-icon">📖</div>
+        <h3>收藏单词</h3>
+        <p>查询到的词源可以一键收藏，随时复习。日积月累，建立专属词源知识库。</p>
       </div>
       <div class="feature-card">
-        <div class="feature-icon">🌱</div>
-        <h3>词根网络</h3>
-        <p>掌握一个词根，理解一族单词。词根词缀的学习让词汇量呈指数级增长。</p>
+        <div class="feature-icon">🌐</div>
+        <h3>实时数据</h3>
+        <p>词源数据来自词源谷，实时获取。每个词的词源解释均由专业整理，来源可靠。</p>
       </div>
     </div>
   </div>
 </section>
 
 <script>
-// 首页搜索 — 跳转到探词页
 const heroInput = document.getElementById('heroSearchInput');
 const heroResults = document.getElementById('heroSearchResults');
 const BASE_URL = '{{ "/" | relative_url }}';
 
 heroInput.addEventListener('input', function() {
-  const q = this.value.trim().toLowerCase();
-  if (!q) { heroResults.innerHTML = ''; heroResults.classList.remove('active'); return; }
-  if (typeof window.searchIndex !== 'undefined') {
-    performSearch(q, heroResults);
-  }
+  heroResults.innerHTML = '';
+  heroResults.classList.remove('active');
 });
 
 document.getElementById('heroSearchBtn').addEventListener('click', function() {

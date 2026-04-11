@@ -1,17 +1,32 @@
 /**
  * EnStory — lookup.js
- * 实时词源查询：通过 CORS 代理抓取词源谷内容，解析后渲染到页面
+ * 实时词源查询：通过 CORS 代理抓取词源谷 /word/{word} 页面，解析后渲染
+ * 
+ * 代理配置说明：
+ *   1. 部署 cors-proxy-worker.js 到 Cloudflare Workers，将 URL 填入 CF_WORKER_URL
+ *   2. 也可直接使用免费代理（自动降级），但可能不稳定
  */
 
 (function () {
   'use strict';
 
+  // ══════════════════════════════════════════════════════════════
+  // 👉 在这里填入你的 Cloudflare Worker URL（部署后复制过来）
+  //    留空则自动降级到免费代理（可能较慢）
+  const CF_WORKER_URL = '';
+  // ══════════════════════════════════════════════════════════════
+
   // ── CORS 代理列表（自动切换） ──────────────────────────────────────
-  const PROXY_LIST = [
-    url => `https://api.allorigins.win/get?url=${encodeURIComponent(url)}`,
-    url => `https://corsproxy.io/?${encodeURIComponent(url)}`,
-    url => `https://thingproxy.freeboard.io/fetch/${url}`,
-  ];
+  const PROXY_LIST = (() => {
+    const list = [];
+    if (CF_WORKER_URL) {
+      list.push(url => `${CF_WORKER_URL}/?url=${encodeURIComponent(url)}`);
+    }
+    // 免费代理（不稳定，仅作降级）
+    list.push(url => `https://corsproxy.io/?${encodeURIComponent(url)}`);
+    list.push(url => `https://api.allorigins.win/get?url=${encodeURIComponent(url)}`);
+    return list;
+  })();
 
   const BASE = 'https://www.ciyuangu.com';
 
@@ -24,7 +39,7 @@
       .replace(/"/g, '&quot;');
   }
 
-  // 通过代理拉取 HTML，返回字符串
+  // 通过代理拉取 HTML
   async function fetchHtml(targetUrl) {
     let lastErr;
     for (const proxyFn of PROXY_LIST) {
@@ -33,9 +48,7 @@
         const res = await fetch(proxyUrl, { signal: AbortSignal.timeout(8000) });
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const json = await res.json().catch(() => null);
-        // allorigins 返回 { contents: "..." }
         if (json && json.contents) return json.contents;
-        // 其他代理直接返回文本
         return await res.text();
       } catch (e) {
         lastErr = e;
@@ -44,56 +57,76 @@
     throw lastErr || new Error('所有代理均请求失败');
   }
 
-  // 解析词源谷 /word/{word} 页面
+  // ── 判断词条是否存在 ───────────────────────────────────────────────
+  // 词源谷的"词不存在"页面通常包含这些文本
+  const NOT_FOUND_KEYWORDS = [
+    '未找到', '找不到', '词条不存在', '没有找到', '404', 'not found',
+    '页面不存在', '这个词还没有', '暂无收录'
+  ];
+
+  function isNotFoundPage(text) {
+    const lower = text.toLowerCase();
+    return NOT_FOUND_KEYWORDS.some(kw => lower.includes(kw.toLowerCase()));
+  }
+
+  // ── 解析词源谷 /word/{word} 页面 ──────────────────────────────────
   function parseWordPage(html, word) {
     const parser = new DOMParser();
     const doc = parser.parseFromString(html, 'text/html');
+    const bodyText = doc.body ? (doc.body.innerText || doc.body.textContent || '') : '';
+    const bodyHtml = doc.body ? doc.body.innerHTML || '' : '';
+
+    // 检测是否为"词不存在"页面
+    if (isNotFoundPage(bodyText) || isNotFoundPage(bodyHtml)) {
+      return { word, notFound: true };
+    }
 
     const result = {
-      word: word,
+      word,
+      notFound: false,
       phonetic_en: '',
       phonetic_us: '',
       pos: '',
-      definition: '',
       etymology: '',
       first_year: '',
       related: [],
       source_url: `${BASE}/word/${word}`,
     };
 
-    // 尝试多种选择器（词源谷结构）
-    const text = doc.body ? doc.body.innerText || doc.body.textContent : '';
-
     // ── 音标 ─────────────────────────────────────────────────────
-    const phoneticMatch = text.match(/英\s*[\[【]([^\]】]+)[\]】].*?美\s*[\[【]([^\]】]+)[\]】]/s);
+    // 典型格式: 英 [ˈkəˈmeməreit]  美 [kəˈmeməret]
+    const phoneticMatch = bodyText.match(/英\s*[\[【]([^\]】]+)[\]】].*?美\s*[\[【]([^\]】]+)[\]】]/s);
     if (phoneticMatch) {
       result.phonetic_en = phoneticMatch[1].trim();
       result.phonetic_us = phoneticMatch[2].trim();
     } else {
       // 宽松匹配
-      const pm = text.match(/\[([^\]]+)\]/);
+      const pm = bodyText.match(/\[([^\]]{5,50})\]/);
       if (pm) result.phonetic_en = pm[1].trim();
     }
 
     // ── 词性 ─────────────────────────────────────────────────────
-    const posMatch = text.match(/\b(N\.|V\.|ADJ\.|ADV\.|INTERJ\.|PREP\.|CONJ\.|PRON\.)\b/i);
-    if (posMatch) result.pos = posMatch[1];
+    const posMatch = bodyText.match(
+      /\b(n\.|v\.|adj\.|adv\.|interj\.|prep\.|conj\.|pron\.)\b/gi
+    );
+    if (posMatch) result.pos = posMatch[0];
 
-    // ── 词源正文 ─────────────────────────────────────────────────
-    // 词源谷词源块通常在含「源自」「来自」「追溯」「源于」的段落
-    const allParas = Array.from(doc.querySelectorAll('p, div.content, .word-content, .entry-content, article p'));
-    const etyParas = allParas
+    // ── 词源正文 ───────────────────────────────────────────────────
+    // 找含词源关键词的段落
+    const allEls = Array.from(doc.querySelectorAll('p, div.content, .word-content, .entry-content, article > div'));
+    const etyCandidates = allEls
       .map(el => el.textContent.trim())
-      .filter(t => t.length > 40 && (
+      .filter(t => t.length > 30 && (
         t.includes('源自') || t.includes('来自') || t.includes('追溯') ||
         t.includes('源于') || t.includes('世纪') || t.includes('年代') ||
-        t.includes('PIE') || t.includes('古') || t.includes('拉丁')
+        t.includes('PIE') || t.includes('古英语') || t.includes('古希腊') ||
+        t.includes('拉丁') || t.includes('希腊') || t.includes('词根')
       ));
 
-    if (etyParas.length > 0) {
-      result.etymology = etyParas.slice(0, 4).join('\n\n');
+    if (etyCandidates.length > 0) {
+      result.etymology = etyCandidates.slice(0, 4).join('\n\n');
     } else {
-      // 降级：找 main 内最长的段落
+      // 降级：找最长的正文段落
       const bodyParas = Array.from(doc.querySelectorAll('p'))
         .map(el => el.textContent.trim())
         .filter(t => t.length > 50)
@@ -101,37 +134,37 @@
       result.etymology = bodyParas.slice(0, 3).join('\n\n');
     }
 
+    // 如果正文太短或为空，视为无效页面
+    if (!result.etymology || result.etymology.length < 20) {
+      return { word, notFound: true };
+    }
+
     // ── 首次记录年份 ─────────────────────────────────────────────
-    const yearMatch = result.etymology.match(/(\d{3,4})\s*年/);
+    const yearMatch = result.etymology.match(/(\d{4})\s*年/);
     if (yearMatch) result.first_year = yearMatch[1];
 
-    // ── 相关词 ───────────────────────────────────────────────────
-    const links = Array.from(doc.querySelectorAll('a[href*="/word/"]'));
-    const relatedWords = links
-      .map(a => a.textContent.trim().toLowerCase())
-      .filter(w => w && w !== word && /^[a-z\-]+$/.test(w))
-      .filter((w, i, arr) => arr.indexOf(w) === i)
-      .slice(0, 8);
+    // ── 相关词 ─────────────────────────────────────────────────────
+    // 只从 <div class="related"> 区块提取，排除随机词区域 <aside class="hot">
+    const relatedDiv = doc.querySelector('.related');
+    const links = relatedDiv
+      ? Array.from(relatedDiv.querySelectorAll('a[href*="/word/"]'))
+      : [];
+    const seen = new Set();
+    const relatedWords = [];
+    for (const a of links) {
+      const href = a.getAttribute('href') || '';
+      const m = href.match(/\/word\/([^/?#]+)/);
+      if (!m) continue;
+      const w = m[1].toLowerCase();
+      if (w && w !== word && /^[a-z\-]+$/.test(w) && !seen.has(w)) {
+        seen.add(w);
+        relatedWords.push(w);
+      }
+      if (relatedWords.length >= 8) break;
+    }
     result.related = relatedWords;
 
     return result;
-  }
-
-  // 解析搜索页 /search/{word}，提取匹配词列表
-  function parseSearchPage(html, query) {
-    const parser = new DOMParser();
-    const doc = parser.parseFromString(html, 'text/html');
-    const links = Array.from(doc.querySelectorAll('a[href*="/word/"]'));
-    const words = links
-      .map(a => {
-        const href = a.getAttribute('href') || '';
-        const m = href.match(/\/word\/([^/?"#]+)/);
-        return m ? m[1].toLowerCase() : null;
-      })
-      .filter(Boolean)
-      .filter((w, i, arr) => arr.indexOf(w) === i)
-      .slice(0, 6);
-    return words;
   }
 
   // ── 渲染函数 ──────────────────────────────────────────────────────
@@ -146,25 +179,10 @@
   function renderError(msg) {
     return `
       <div class="lookup-error">
-        <div class="error-icon">⚠️</div>
-        <h3>查询遇到了问题</h3>
+        <div class="error-icon">🔍</div>
+        <h3>未找到相关词条</h3>
         <p>${escHtml(msg)}</p>
-        <p class="error-tip">可能原因：网络环境限制、代理服务暂时不可用，或该词词源谷暂无收录。</p>
-      </div>`;
-  }
-
-  function renderSuggestions(words, query) {
-    if (!words.length) return renderError(`词源谷暂无「${query}」相关词条`);
-    return `
-      <div class="lookup-suggestions">
-        <h3>找到以下相关词条，请选择：</h3>
-        <div class="suggestion-list">
-          ${words.map(w => `
-            <button class="suggestion-item" data-word="${escHtml(w)}">
-              <span class="sug-word">${escHtml(w)}</span>
-              <span class="sug-hint">查看词源 →</span>
-            </button>`).join('')}
-        </div>
+        <p class="error-tip">可能原因：该词暂未收录于词源谷，或网络连接不稳定。</p>
       </div>`;
   }
 
@@ -182,16 +200,15 @@
           `<p>${escHtml(p)}</p>`).join('')
       : '<p class="muted">暂无词源信息</p>';
 
+    const base = window.SITE_BASE || '';
     const relatedHtml = data.related.length
       ? data.related.map(w =>
-          `<a class="related-tag lookup-related-link" href="/EnStory/lookup/?q=${encodeURIComponent(w)}" data-word="${escHtml(w)}">${escHtml(w)}</a>`
+          `<a class="related-tag lookup-related-link" href="${base}/lookup/?q=${encodeURIComponent(w)}" data-word="${escHtml(w)}">${escHtml(w)}</a>`
         ).join('')
       : '<span class="muted">暂无</span>';
 
     return `
       <div class="lookup-result-card" id="resultCard">
-
-        <!-- 单词头部 -->
         <header class="lk-header">
           <div class="lk-title-row">
             <h2 class="lk-word">${escHtml(data.word)}</h2>
@@ -208,67 +225,21 @@
           </div>
         </header>
 
-        <!-- 词源正文 -->
         <section class="lk-section">
           <h3 class="lk-section-title"><span>⚗️</span> 词源解析</h3>
-          <div class="lk-etymology">
-            ${etyLines}
-          </div>
+          <div class="lk-etymology">${etyLines}</div>
         </section>
 
-        <!-- 相关词 -->
         <section class="lk-section">
           <h3 class="lk-section-title"><span>🔗</span> 相关词汇</h3>
           <div class="lk-related">${relatedHtml}</div>
         </section>
 
-        <!-- 来源注释 -->
         <footer class="lk-footer">
           <span>数据来源：</span>
           <a href="${escHtml(data.source_url)}" target="_blank" rel="noopener">词源谷 ciyuangu.com</a>
         </footer>
-
       </div>`;
-  }
-
-  // ── 核心查询流程 ───────────────────────────────────────────────────
-  async function lookupWord(rawWord) {
-    const word = rawWord.trim().toLowerCase().replace(/\s+/g, '-');
-    if (!word) return;
-
-    const resultEl = document.getElementById('lookupResult');
-    resultEl.innerHTML = renderLoading();
-    resultEl.scrollIntoView({ behavior: 'smooth', block: 'start' });
-
-    // 1. 先尝试直接访问 /word/{word}
-    try {
-      const html = await fetchHtml(`${BASE}/word/${word}`);
-      const data = parseWordPage(html, word);
-      resultEl.innerHTML = renderWordResult(data);
-      bindResultEvents(data);
-      // 更新 URL query string（不刷页）
-      history.pushState({}, '', `?q=${encodeURIComponent(word)}`);
-      return;
-    } catch (e) {
-      console.warn('Direct word fetch failed:', e);
-    }
-
-    // 2. 降级：搜索页
-    try {
-      const html = await fetchHtml(`${BASE}/search/${word}`);
-      const words = parseSearchPage(html, word);
-      if (words.length === 1) {
-        // 只有一个结果，直接查
-        return lookupWord(words[0]);
-      }
-      resultEl.innerHTML = renderSuggestions(words, word);
-      bindSuggestionEvents();
-      return;
-    } catch (e) {
-      console.warn('Search page fetch failed:', e);
-    }
-
-    resultEl.innerHTML = renderError(`无法获取「${word}」的词源信息`);
   }
 
   // ── 收藏逻辑 ──────────────────────────────────────────────────────
@@ -287,9 +258,7 @@
         });
         localStorage.setItem('enstory_wordbook', JSON.stringify(wb));
       }
-    } catch (e) {
-      console.error('Save failed', e);
-    }
+    } catch (e) { console.error('Save failed', e); }
   }
 
   function unsaveWord(word) {
@@ -306,39 +275,28 @@
   function bindResultEvents(data) {
     _currentData = data;
     const saveBtn = document.getElementById('saveBtn');
-    if (!saveBtn) return;
-    saveBtn.addEventListener('click', function () {
-      const saved = isSaved(data.word);
-      if (saved) {
-        unsaveWord(data.word);
-        saveBtn.classList.remove('saved');
-        saveBtn.querySelector('.save-icon').textContent = '☆';
-        saveBtn.querySelector('.save-text').textContent = '收藏';
-      } else {
-        saveWord(data);
-        saveBtn.classList.add('saved');
-        saveBtn.querySelector('.save-icon').textContent = '★';
-        saveBtn.querySelector('.save-text').textContent = '已收藏';
-        showToast(`「${data.word}」已加入单词本 ✓`);
-      }
-    });
+    if (saveBtn) {
+      saveBtn.addEventListener('click', function () {
+        const saved = isSaved(data.word);
+        if (saved) {
+          unsaveWord(data.word);
+          saveBtn.classList.remove('saved');
+          saveBtn.querySelector('.save-icon').textContent = '☆';
+          saveBtn.querySelector('.save-text').textContent = '收藏';
+        } else {
+          saveWord(data);
+          saveBtn.classList.add('saved');
+          saveBtn.querySelector('.save-icon').textContent = '★';
+          saveBtn.querySelector('.save-text').textContent = '已收藏';
+          showToast(`「${data.word}」已加入单词本 ✓`);
+        }
+      });
+    }
 
     // 相关词点击
     document.querySelectorAll('.lookup-related-link').forEach(a => {
       a.addEventListener('click', function (e) {
         e.preventDefault();
-        const w = this.dataset.word;
-        if (w) {
-          document.getElementById('lookupInput').value = w;
-          lookupWord(w);
-        }
-      });
-    });
-  }
-
-  function bindSuggestionEvents() {
-    document.querySelectorAll('.suggestion-item').forEach(btn => {
-      btn.addEventListener('click', function () {
         const w = this.dataset.word;
         if (w) {
           document.getElementById('lookupInput').value = w;
@@ -359,6 +317,33 @@
       toast.classList.remove('show');
       setTimeout(() => toast.remove(), 300);
     }, 2200);
+  }
+
+  // ── 核心查询：只用 /word/ ──────────────────────────────────────────
+  async function lookupWord(rawWord) {
+    const word = rawWord.trim().toLowerCase().replace(/\s+/g, '-');
+    if (!word) return;
+
+    const resultEl = document.getElementById('lookupResult');
+    resultEl.innerHTML = renderLoading();
+    resultEl.scrollIntoView({ behavior: 'smooth', block: 'start' });
+
+    try {
+      const html = await fetchHtml(`${BASE}/word/${word}`);
+      const data = parseWordPage(html, word);
+
+      if (data.notFound) {
+        resultEl.innerHTML = renderError(`词源谷暂未收录「${word}」`);
+        return;
+      }
+
+      resultEl.innerHTML = renderWordResult(data);
+      bindResultEvents(data);
+      history.pushState({}, '', `?q=${encodeURIComponent(word)}`);
+    } catch (e) {
+      console.warn('Lookup failed:', e);
+      resultEl.innerHTML = renderError(`无法连接到词源谷，请检查网络后重试`);
+    }
   }
 
   // ── 初始化 ────────────────────────────────────────────────────────
