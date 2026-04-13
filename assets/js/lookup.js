@@ -78,15 +78,20 @@
     if (posMatch) result.pos = posMatch[0];
 
     // ── 词源正文 ───────────────────────────────────────────────────
-    const allEls = Array.from(doc.querySelectorAll('p, div.content, .word-content, .entry-content, article > div'));
-    const etyCandidates = allEls
+    // 只取页面中最小颗粒度的 <p> 元素，避免父子嵌套导致文本重复
+    const seen = new Set();
+    const etyCandidates = Array.from(doc.querySelectorAll('p'))
       .map(el => el.textContent.trim())
-      .filter(t => t.length > 30 && (
-        t.includes('源自') || t.includes('来自') || t.includes('追溯') ||
-        t.includes('源于') || t.includes('世纪') || t.includes('年代') ||
-        t.includes('PIE') || t.includes('古英语') || t.includes('古希腊') ||
-        t.includes('拉丁') || t.includes('希腊') || t.includes('词根')
-      ));
+      .filter(t => {
+        if (t.length <= 30 || seen.has(t)) return false;
+        seen.add(t);
+        return (
+          t.includes('源自') || t.includes('来自') || t.includes('追溯') ||
+          t.includes('源于') || t.includes('世纪') || t.includes('年代') ||
+          t.includes('PIE') || t.includes('古英语') || t.includes('古希腊') ||
+          t.includes('拉丁') || t.includes('希腊') || t.includes('词根')
+        );
+      });
 
     if (etyCandidates.length > 0) {
       result.etymology = etyCandidates.slice(0, 4).join('\n\n');
@@ -94,6 +99,10 @@
       const bodyParas = Array.from(doc.querySelectorAll('p'))
         .map(el => el.textContent.trim())
         .filter(t => t.length > 50)
+        .reduce((acc, t) => {
+          if (!acc.set.has(t)) { acc.set.add(t); acc.arr.push(t); }
+          return acc;
+        }, { set: new Set(), arr: [] }).arr
         .sort((a, b) => b.length - a.length);
       result.etymology = bodyParas.slice(0, 3).join('\n\n');
     }
@@ -111,15 +120,15 @@
     const links = relatedDiv
       ? Array.from(relatedDiv.querySelectorAll('a[href*="/word/"]'))
       : [];
-    const seen = new Set();
+    const seenRelated = new Set();
     const relatedWords = [];
     for (const a of links) {
       const href = a.getAttribute('href') || '';
       const m = href.match(/\/word\/([^/?#]+)/);
       if (!m) continue;
       const w = m[1].toLowerCase();
-      if (w && w !== word && /^[a-z\-]+$/.test(w) && !seen.has(w)) {
-        seen.add(w);
+      if (w && w !== word && /^[a-z\-]+$/.test(w) && !seenRelated.has(w)) {
+        seenRelated.add(w);
         relatedWords.push(w);
       }
       if (relatedWords.length >= 8) break;
